@@ -1,0 +1,444 @@
+// TicketSense data model
+// SQLite is used for a zero-install, fully-portable demo (see docs/architecture.md ADR).
+//
+// NOTE: SQLite's Prisma connector does not support native enum types, so
+// enum-like fields are modeled as String columns constrained at the
+// application layer (Zod schemas + TypeScript literal unions in
+// src/types/enums.ts). Valid values are documented next to each field.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id            String   @id @default(cuid())
+  email         String   @unique
+  name          String
+  passwordHash  String
+  role          String // SUPER_ADMIN | SUPPORT_MANAGER | SUPPORT_AGENT | READONLY_ANALYST
+  isActive      Boolean  @default(true)
+  teamId        String?
+  team          Team?    @relation(fields: [teamId], references: [id])
+  isSeniorAgent Boolean  @default(false)
+  maxLoad       Int      @default(15)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  ticketsAssigned   Ticket[]           @relation("AssignedAgent")
+  ticketsCreated    Ticket[]           @relation("CreatedBy")
+  messages          TicketMessage[]
+  events            TicketEvent[]
+  recommendationsOn AIRecommendation[] @relation("ReviewedBy")
+  auditLogs         AuditLog[]
+  knowledgeArticles KnowledgeArticle[]
+
+  issuesOwned        ProductIssue[]           @relation("IssueOwner")
+  impactScenarios    ImpactScenario[]         @relation("ScenarioCreatedBy")
+  workItemsOwned     WorkItem[]               @relation("WorkItemOwner")
+  workItemVersions   WorkItemVersion[]        @relation("WorkItemVersionEditedBy")
+  measurementsVerified ResolutionMeasurement[] @relation("MeasurementVerifiedBy")
+
+  @@index([teamId])
+  @@index([role])
+}
+
+model Customer {
+  id        String   @id @default(cuid())
+  name      String
+  email     String   @unique
+  tier      String   @default("STANDARD") // STANDARD|PRO|ENTERPRISE
+  createdAt DateTime @default(now())
+
+  tickets Ticket[]
+}
+
+model Team {
+  id           String   @id @default(cuid())
+  name         String   @unique
+  description  String?
+  isEscalation Boolean  @default(false)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  members           User[]
+  tickets           Ticket[]
+  assignmentRulesTo AssignmentRule[] @relation("TargetTeam")
+}
+
+model TicketCategory {
+  id          String   @id @default(cuid())
+  name        String   @unique
+  description String?
+  createdAt   DateTime @default(now())
+
+  tickets         Ticket[]
+  assignmentRules AssignmentRule[] @relation("CategoryCondition")
+}
+
+model Ticket {
+  id           String @id @default(cuid())
+  ticketNumber Int    @unique
+  subject      String
+  description  String
+  status       String @default("NEW") // NEW|OPEN|IN_PROGRESS|PENDING|RESOLVED|CLOSED
+  priority     String @default("MEDIUM") // LOW|MEDIUM|HIGH|CRITICAL
+  sentiment    String? // POSITIVE|NEUTRAL|NEGATIVE|FRUSTRATED
+
+  requesterName  String
+  requesterEmail String
+
+  customerId String?
+  customer   Customer? @relation(fields: [customerId], references: [id])
+
+  categoryId String?
+  category   TicketCategory? @relation(fields: [categoryId], references: [id])
+
+  teamId String?
+  team   Team?   @relation(fields: [teamId], references: [id])
+
+  assignedAgentId String?
+  assignedAgent   User?   @relation("AssignedAgent", fields: [assignedAgentId], references: [id])
+
+  createdById String?
+  createdBy   User?   @relation("CreatedBy", fields: [createdById], references: [id])
+
+  reopenCount Int @default(0)
+
+  firstRespondedAt DateTime?
+  resolvedAt       DateTime?
+  closedAt         DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  messages        TicketMessage[]
+  events          TicketEvent[]
+  slaInstance     SLAInstance?
+  recommendations AIRecommendation[]
+  issueLinks      IssueTicketLink[]
+
+  @@index([status])
+  @@index([priority])
+  @@index([categoryId])
+  @@index([assignedAgentId])
+  @@index([teamId])
+  @@index([createdAt])
+  @@index([customerId])
+}
+
+model TicketMessage {
+  id        String   @id @default(cuid())
+  ticketId  String
+  ticket    Ticket   @relation(fields: [ticketId], references: [id])
+  authorId  String?
+  author    User?    @relation(fields: [authorId], references: [id])
+  type      String // CUSTOMER_REPLY|AGENT_REPLY|INTERNAL_NOTE
+  body      String
+  createdAt DateTime @default(now())
+
+  @@index([ticketId])
+}
+
+model TicketEvent {
+  id        String   @id @default(cuid())
+  ticketId  String
+  ticket    Ticket   @relation(fields: [ticketId], references: [id])
+  actorId   String?
+  actor     User?    @relation(fields: [actorId], references: [id])
+  type      String // e.g. STATUS_CHANGE, ASSIGNMENT, SLA_BREACH, AI_ANALYSIS, NOTE_ADDED, REOPEN
+  message   String
+  metadata  String? // JSON string payload
+  createdAt DateTime @default(now())
+
+  @@index([ticketId])
+  @@index([type])
+}
+
+model SLAPolicy {
+  id                     String   @id @default(cuid())
+  name                   String   @unique
+  priority               String   @unique // LOW|MEDIUM|HIGH|CRITICAL
+  firstResponseTargetMin Int
+  resolutionTargetMin    Int
+  businessHoursOnly      Boolean  @default(true)
+  createdAt              DateTime @default(now())
+  updatedAt              DateTime @updatedAt
+
+  instances SLAInstance[]
+}
+
+model SLAInstance {
+  id       String @id @default(cuid())
+  ticketId String @unique
+  ticket   Ticket @relation(fields: [ticketId], references: [id])
+
+  slaPolicyId String
+  slaPolicy   SLAPolicy @relation(fields: [slaPolicyId], references: [id])
+
+  firstResponseDueAt DateTime
+  resolutionDueAt    DateTime
+
+  firstResponseBreached Boolean @default(false)
+  resolutionBreached    Boolean @default(false)
+
+  firstResponseMetAt DateTime?
+  resolvedMetAt      DateTime?
+
+  pausedMinutes Int @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([resolutionDueAt])
+  @@index([firstResponseDueAt])
+}
+
+model AssignmentRule {
+  id        String  @id @default(cuid())
+  name      String
+  order     Int
+  isActive  Boolean @default(true)
+  isDefault Boolean @default(false)
+
+  conditionPriority   String? // LOW|MEDIUM|HIGH|CRITICAL
+  conditionCategoryId String?
+  conditionCategory   TicketCategory? @relation("CategoryCondition", fields: [conditionCategoryId], references: [id])
+
+  strategy     String // ROUND_ROBIN|LEAST_ACTIVE|CATEGORY_BASED|PRIORITY_ESCALATION
+  targetTeamId String?
+  targetTeam   Team?  @relation("TargetTeam", fields: [targetTeamId], references: [id])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([order])
+}
+
+model AIRecommendation {
+  id       String @id @default(cuid())
+  ticketId String
+  ticket   Ticket @relation(fields: [ticketId], references: [id])
+
+  suggestedCategory    String?
+  suggestedSubcategory String?
+  suggestedPriority    String? // LOW|MEDIUM|HIGH|CRITICAL
+  suggestedSentiment   String? // POSITIVE|NEUTRAL|NEGATIVE|FRUSTRATED
+  confidence           Float
+  reasoning            String
+
+  status       String  @default("PENDING") // PENDING|ACCEPTED|REJECTED|EDITED
+  reviewedById String?
+  reviewedBy   User?   @relation("ReviewedBy", fields: [reviewedById], references: [id])
+  editedValue  String? // JSON string if the agent edited the suggestion
+
+  createdAt  DateTime  @default(now())
+  reviewedAt DateTime?
+
+  @@index([ticketId])
+  @@index([status])
+}
+
+model KnowledgeArticle {
+  id          String   @id @default(cuid())
+  title       String
+  body        String
+  tags        String // comma-separated keywords
+  isPublished Boolean  @default(false)
+  authorId    String?
+  author      User?    @relation(fields: [authorId], references: [id])
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([isPublished])
+}
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  actorId   String?
+  actor     User?    @relation(fields: [actorId], references: [id])
+  action    String
+  entity    String
+  entityId  String?
+  details   String?
+  createdAt DateTime @default(now())
+
+  @@index([entity])
+  @@index([actorId])
+}
+
+// =====================================================================
+// V2 — TicketSense Product Intelligence modules
+// (Issue Genome / Fix Impact Simulator / Support-to-Roadmap / Resolution
+// Intelligence). See docs/product-intelligence.md for formulas & ERD.
+// =====================================================================
+
+model ProductIssue {
+  id          String   @id @default(cuid())
+  title       String
+  description String
+  productArea String
+  status      String   @default("DETECTED") // DETECTED|UNDER_REVIEW|CONFIRMED|PLANNED|IN_DEVELOPMENT|RELEASED|MONITORING|RESOLVED|REOPENED
+  severity    String   @default("MEDIUM") // LOW|MEDIUM|HIGH|CRITICAL
+  ownerId     String?
+  owner       User?    @relation("IssueOwner", fields: [ownerId], references: [id])
+  firstSeenAt DateTime
+  lastSeenAt  DateTime
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  ticketLinks     IssueTicketLink[]
+  impactScenarios ImpactScenario[]
+  workItems       WorkItem[]
+  releaseLinks    ReleaseIssueLink[]
+  measurements    ResolutionMeasurement[]
+
+  @@index([status])
+  @@index([productArea])
+}
+
+model IssueTicketLink {
+  id        String       @id @default(cuid())
+  issueId   String
+  issue     ProductIssue @relation(fields: [issueId], references: [id])
+  ticketId  String
+  ticket    Ticket       @relation(fields: [ticketId], references: [id])
+  addedAt   DateTime     @default(now())
+  addedBy   String? // userId, or "SYSTEM_CLUSTERING" for automated links
+  manual    Boolean      @default(false)
+  removedAt DateTime? // set when unlinked; row is kept for audit history
+  removedBy String?
+
+  @@index([issueId])
+  @@index([ticketId])
+}
+
+model ClusteringRun {
+  id                String   @id @default(cuid())
+  ranAt             DateTime @default(now())
+  algorithm         String
+  parameters        String // JSON: { similarityThreshold, minClusterSize, ... }
+  ticketsConsidered Int
+  issuesCreated     Int
+  issuesUpdated     Int
+}
+
+model ImpactScenario {
+  id           String       @id @default(cuid())
+  issueId      String
+  issue        ProductIssue @relation(fields: [issueId], references: [id])
+  name         String
+  scenarioType String // CONSERVATIVE|EXPECTED|OPTIMISTIC
+  inputs       String // JSON — see docs for shape
+  outputs      String // JSON — computed server-side, never trusted from client
+  createdById  String?
+  createdBy    User?        @relation("ScenarioCreatedBy", fields: [createdById], references: [id])
+  createdAt    DateTime     @default(now())
+
+  workItems WorkItem[]
+
+  @@index([issueId])
+}
+
+model WorkItem {
+  id                     String   @id @default(cuid())
+  issueId                String
+  issue                  ProductIssue @relation(fields: [issueId], references: [id])
+  title                  String
+  businessProblem        String
+  productArea            String
+  problemDescription     String
+  customerImpact         String
+  observedSymptoms       String
+  rootCause              String?
+  rootCauseIsHypothesis  Boolean  @default(true)
+  reproductionSteps      String?
+  expectedBehavior       String?
+  actualBehavior         String?
+  proposedSolution       String?
+  userStory              String
+  acceptanceCriteria     String // Gherkin text
+  edgeCases              String?
+  dependencies           String?
+  priorityRecommendation String?
+  impactScenarioId       String?
+  impactScenario         ImpactScenario? @relation(fields: [impactScenarioId], references: [id])
+  assumptions            String?
+  openQuestions          String?
+  status                 String   @default("DRAFT") // DRAFT|UNDER_REVIEW|APPROVED|BACKLOG|IN_PROGRESS|RELEASED|VERIFIED|REJECTED|NEEDS_REVISION
+  ownerId                String?
+  owner                  User?    @relation("WorkItemOwner", fields: [ownerId], references: [id])
+  createdAt              DateTime @default(now())
+  updatedAt              DateTime @updatedAt
+
+  versions WorkItemVersion[]
+
+  @@index([issueId])
+  @@index([status])
+}
+
+model WorkItemVersion {
+  id         String   @id @default(cuid())
+  workItemId String
+  workItem   WorkItem @relation(fields: [workItemId], references: [id])
+  snapshot   String // JSON snapshot of the WorkItem at edit time
+  editedById String?
+  editedBy   User?    @relation("WorkItemVersionEditedBy", fields: [editedById], references: [id])
+  editedAt   DateTime @default(now())
+
+  @@index([workItemId])
+}
+
+model Release {
+  id          String   @id @default(cuid())
+  name        String
+  version     String
+  releasedAt  DateTime
+  description String?
+  createdAt   DateTime @default(now())
+
+  issueLinks   ReleaseIssueLink[]
+  measurements ResolutionMeasurement[]
+}
+
+model ReleaseIssueLink {
+  id        String       @id @default(cuid())
+  releaseId String
+  release   Release      @relation(fields: [releaseId], references: [id])
+  issueId   String
+  issue     ProductIssue @relation(fields: [issueId], references: [id])
+  linkedAt  DateTime     @default(now())
+
+  @@unique([releaseId, issueId])
+  @@index([issueId])
+}
+
+model ResolutionMeasurement {
+  id                     String       @id @default(cuid())
+  issueId                String
+  issue                  ProductIssue @relation(fields: [issueId], references: [id])
+  releaseId              String
+  release                Release      @relation(fields: [releaseId], references: [id])
+  preWindowStart         DateTime
+  preWindowEnd           DateTime
+  postWindowStart        DateTime
+  postWindowEnd          DateTime
+  preTicketCount         Int
+  postTicketCount        Int
+  preAffectedCustomers   Int
+  postAffectedCustomers  Int
+  preSupportHours        Float
+  postSupportHours       Float
+  outcomeClassification  String // IMPROVING|NO_MATERIAL_CHANGE|WORSENING|INSUFFICIENT_DATA
+  computedAt             DateTime  @default(now())
+  verifiedById           String?
+  verifiedBy             User?     @relation("MeasurementVerifiedBy", fields: [verifiedById], references: [id])
+  verifiedAt             DateTime?
+
+  @@index([issueId])
+  @@index([releaseId])
+}
